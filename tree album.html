@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>For You | Gesture Galaxy X</title>
+    <style>
+        body { 
+            margin: 0; overflow: hidden; background-color: #000; 
+            font-family: 'Cinzel', serif;
+            cursor: grab;
+        }
+        canvas { display: block; }
+
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 10;
+        }
+
+        #title {
+            color: #fff; font-size: 4rem; font-weight: 700; letter-spacing: 8px;
+            text-shadow: 0 0 30px rgba(255, 200, 50, 0.8);
+            opacity: 0; transition: opacity 2s ease; mix-blend-mode: screen; text-align: center;
+        }
+        
+        #subtitle {
+            margin-top: 15px; color: rgba(255, 255, 255, 0.8); font-size: 1.2rem; letter-spacing: 4px;
+            opacity: 0; transition: opacity 2s ease 1s; text-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+        }
+
+        /* 参考 1215.html 的摄像头样式 */
+        #video-container {
+            position: absolute; bottom: 20px; right: 20px; width: 160px; height: 120px; z-index: 20;
+            border: 1px solid rgba(255, 215, 0, 0.3); border-radius: 8px; overflow: hidden;
+            transform: scaleX(-1); /* 镜像翻转 */
+            box-shadow: 0 0 15px rgba(0,0,0,0.5);
+            background: rgba(0,0,0,0.3);
+            transition: opacity 0.3s;
+            opacity: 0.8;
+        }
+        #input-video { 
+            width: 100%; height: 100%; object-fit: cover; opacity: 0.4; 
+            position: absolute; top: 0; left: 0;
+        }
+        #skeleton-canvas {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10;
+        }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #ffd700; font-size: 14px; letter-spacing: 2px; animation: pulse 1s infinite alternate;
+        }
+        @keyframes pulse { from { opacity: 0.3; } to { opacity: 1; text-shadow: 0 0 20px #ffd700; } }
+
+        /* 操作提示 */
+        #instructions {
+            position: absolute; bottom: 20px; left: 20px; 
+            color: rgba(255,255,255,0.6); font-size: 12px; line-height: 1.8;
+            pointer-events: none; opacity: 0; transition: opacity 2s ease 2s;
+            text-align: left;
+        }
+        .highlight { color: #ffd700; font-weight: bold; }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&display=swap" rel="stylesheet">
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="video-container">
+        <video id="input-video" playsinline muted></video>
+        <canvas id="skeleton-canvas"></canvas>
+    </div>
+
+    <div id="loading">INITIALIZING AI VISION...</div>
+    
+    <div id="ui-layer">
+        <div id="title">Merry Christmas</div>
+        <div id="subtitle">The Galaxy of You</div>
+    </div>
+
+    <div id="instructions">
+        • <span class="highlight">握拳</span> : 聚合圣诞树<br/>
+        • <span class="highlight">五指张开</span> : 炸裂星系<br/>
+        • <span class="highlight">左右挥手</span> : 旋转星系<br/>
+        • <span class="highlight">捏合手指</span> : 抓取照片
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // --- 配置区 (V3.6 视觉配置) ---
+        const CONFIG = {
+            particleCount: 6000,
+            particleColor: 0xffaa33, 
+            treeHeight: 30, 
+            treeRadius: 12,
+            photos: [], 
+        };
+
+        // 🟢 填入照片链接
+        const YOUR_PHOTOS = [
+            // 'https://...',
+        ];
+
+        if (YOUR_PHOTOS.length > 0) {
+            CONFIG.photos = YOUR_PHOTOS;
+        } else {
+            for (let i = 0; i < 30; i++) {
+                CONFIG.photos.push(`https://picsum.photos/id/${i + 15}/600/600`);
+            }
+        }
+
+        // --- 状态管理 (融合 1215.html 逻辑) ---
+        const STATE = {
+            mode: 'TREE',
+            mix: 0,
+            focusIndex: -1,
+            pinchPos: new THREE.Vector2(),
+            inputSource: 'NONE', 
+            mousePos: new THREE.Vector2(),
+            
+            // 旋转与手势状态
+            rotationY: 0,
+            rotateVel: 0,
+            isDragging: false,
+            lastMouseX: 0,
+            
+            // 手势专用变量
+            handPos: { x: 0, y: 0 },
+            lastHandPos: { x: 0, y: 0 },
+            isHandPresent: false
+        };
+
+        let scene, camera, renderer, composer;
+        let mainGroup; 
+        let particles, particleMaterial;
+        let photos = [];
+        let clock = new THREE.Clock();
+        const cursorLight = new THREE.PointLight(0xffaa00, 0, 15);
+
+        init();
+        initMediaPipe(); 
+        initInput(); 
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.015);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 2, 40);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            mainGroup = new THREE.Group();
+            scene.add(mainGroup);
+            scene.add(cursorLight);
+
+            // Bloom
+            const renderScene = new RenderPass(scene, camera);
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = 0; bloomPass.strength = 3.5; bloomPass.radius = 0.6;
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            createSupernovaParticles();
+            createClearGallery();
+
+            setTimeout(() => {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('title').style.opacity = 1;
+                document.getElementById('subtitle').style.opacity = 1;
+                document.getElementById('instructions').style.opacity = 1;
+            }, 1000);
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        // --- 粒子与照片 (V3.6 视觉核心) ---
+        function createSupernovaParticles() {
+            const geometry = new THREE.BufferGeometry();
+            const count = CONFIG.particleCount;
+            const positions = [], treeDest = [], explodeDest = [], randoms = [], sizes = [];
+
+            for (let i = 0; i < count; i++) {
+                const iNorm = i / count;
+                const angle = iNorm * Math.PI * 40; 
+                const y = iNorm * CONFIG.treeHeight - CONFIG.treeHeight / 2;
+                const r = Math.pow((1 - (y + CONFIG.treeHeight / 2) / CONFIG.treeHeight), 0.8) * CONFIG.treeRadius;
+                const tx = Math.cos(angle) * r + (Math.random()-0.5);
+                const ty = y + (Math.random()-0.5);
+                const tz = Math.sin(angle) * r + (Math.random()-0.5);
+
+                const ex = (Math.random() - 0.5) * 80;
+                const ey = (Math.random() - 0.5) * 40;
+                const ez = (Math.random() - 0.5) * 80;
+
+                positions.push(tx, ty, tz);
+                treeDest.push(tx, ty, tz);
+                explodeDest.push(ex, ey, ez);
+                randoms.push(Math.random());
+                sizes.push(Math.random());
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('treeDest', new THREE.Float32BufferAttribute(treeDest, 3));
+            geometry.setAttribute('explodeDest', new THREE.Float32BufferAttribute(explodeDest, 3));
+            geometry.setAttribute('aRandom', new THREE.Float32BufferAttribute(randoms, 1));
+            geometry.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1));
+
+            particleMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    uTime: { value: 0 },
+                    uColor: { value: new THREE.Color(CONFIG.particleColor) },
+                    uMix: { value: 0 },
+                    uFocus: { value: 0 }
+                },
+                vertexShader: `
+                    uniform float uTime;
+                    uniform float uMix;
+                    attribute vec3 treeDest;
+                    attribute vec3 explodeDest;
+                    attribute float aRandom;
+                    attribute float aSize;
+                    varying float vAlpha;
+                    varying float vHotness; 
+                    void main() {
+                        vec3 pos = mix(treeDest, explodeDest, uMix);
+                        if(uMix > 0.5) {
+                            pos.x += sin(uTime + aRandom * 100.0) * 0.5;
+                            pos.y += cos(uTime + aRandom * 50.0) * 0.5;
+                        } else {
+                             pos.x += sin(uTime * 1.5 + pos.y * 0.2) * 0.2;
+                        }
+                        vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+                        gl_Position = projectionMatrix * mvPosition;
+                        gl_PointSize = (2.0 + aSize * 4.0) * (30.0 / -mvPosition.z);
+                        float blink = sin(uTime * 4.0 + aRandom * 60.0);
+                        vAlpha = 0.5 + 0.5 * blink;
+                        vHotness = step(0.8, aRandom); 
+                    }
+                `,
+                fragmentShader: `
+                    uniform vec3 uColor;
+                    uniform float uFocus;
+                    varying float vAlpha;
+                    varying float vHotness;
+                    void main() {
+                        vec2 xy = gl_PointCoord.xy - vec2(0.5);
+                        if (length(xy) > 0.5) discard;
+                        float glow = 1.0 - (length(xy) * 2.0);
+                        glow = pow(glow, 2.5);
+                        vec3 col = uColor;
+                        if (vHotness > 0.5) col = mix(uColor, vec3(1.0), glow * 0.8);
+                        float b = vAlpha * glow * 1.5; 
+                        if(uFocus > 0.5) b *= 0.05;
+                        gl_FragColor = vec4(col, b);
+                    }
+                `,
+                transparent: true, depthWrite: false, blending: THREE.AdditiveBlending
+            });
+
+            particles = new THREE.Points(geometry, particleMaterial);
+            mainGroup.add(particles); 
+        }
+
+        function createClearGallery() {
+            const loader = new THREE.TextureLoader();
+            const geometry = new THREE.PlaneGeometry(1, 1);
+            const frameGeo = new THREE.BoxGeometry(1.05, 1.05, 0.02);
+            const frameMat = new THREE.MeshBasicMaterial({ color: 0xffcc00 }); 
+
+            CONFIG.photos.forEach((url, i) => {
+                const group = new THREE.Group();
+                loader.load(url, (tex) => {
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ map: tex }));
+                    mesh.position.z = 0.02;
+                    group.add(mesh);
+                });
+                group.add(new THREE.Mesh(frameGeo, frameMat));
+
+                const ratio = i / CONFIG.photos.length;
+                const treeY = ratio * CONFIG.treeHeight * 0.9 - CONFIG.treeHeight * 0.45;
+                const treeAngle = ratio * Math.PI * 12; 
+                const treeR = (1 - (treeY + CONFIG.treeHeight/2)/CONFIG.treeHeight) * CONFIG.treeRadius;
+                
+                const galleryAngle = (i / CONFIG.photos.length) * Math.PI * 2; 
+                const galleryR = 15 + Math.random() * 10; 
+                const ex = Math.cos(galleryAngle) * galleryR;
+                const ey = (Math.random() - 0.5) * 20; 
+                const ez = Math.sin(galleryAngle) * galleryR;
+
+                photos.push({
+                    obj: group,
+                    treePos: new THREE.Vector3(Math.cos(treeAngle)*treeR, treeY, Math.sin(treeAngle)*treeR),
+                    treeRot: new THREE.Euler(0, -treeAngle, 0), 
+                    explodePos: new THREE.Vector3(ex, ey, ez),
+                    explodeScale: 2.5 + Math.random()
+                });
+                mainGroup.add(group); 
+            });
+        }
+
+        // --- 手势识别逻辑 (核心移植区) ---
+        function initMediaPipe() {
+            const videoElement = document.getElementById('input-video');
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onHandsResults);
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => { await hands.send({image: videoElement}); },
+                width: 320, height: 240
+            });
+            cameraUtils.start();
+        }
+
+        function onHandsResults(results) {
+            const canvas = document.getElementById('skeleton-canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 320; canvas.height = 240;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                STATE.inputSource = 'HAND';
+                STATE.isHandPresent = true;
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // 1. 绘制骨架 (移植自 1215.html)
+                drawSkeleton(ctx, landmarks, canvas.width, canvas.height);
+                
+                // 2. 手势逻辑处理
+                processHandLogic(landmarks);
+            } else {
+                STATE.isHandPresent = false;
+                // 如果手消失了，是否回到树？参考代码逻辑是：手消失不做状态强制切换，保持当前状态
+            }
+        }
+
+        function drawSkeleton(ctx, landmarks, w, h) {
+            ctx.lineWidth = 3; ctx.strokeStyle = '#00ff88'; ctx.fillStyle = '#ff0044';
+            const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+            
+            ctx.beginPath();
+            for (let i = 0; i < connections.length; i++) {
+                const start = landmarks[connections[i][0]];
+                const end = landmarks[connections[i][1]];
+                ctx.moveTo(start.x * w, start.y * h); 
+                ctx.lineTo(end.x * w, end.y * h);
+            }
+            ctx.stroke();
+
+            // 绘制关键点
+            for(let i=0; i<landmarks.length; i++) { 
+                ctx.beginPath(); 
+                ctx.arc(landmarks[i].x * w, landmarks[i].y * h, 3, 0, 2 * Math.PI); 
+                ctx.fill(); 
+            }
+        }
+
+        function processHandLogic(landmarks) {
+            // 更新手掌中心位置
+            const palmX = 1 - (landmarks[0].x + landmarks[9].x) / 2; // 镜像翻转X
+            const palmY = (landmarks[0].y + landmarks[9].y) / 2;
+            
+            // 更新光标位置
+            STATE.handPos.x = palmX * 0.8 + STATE.handPos.x * 0.2; // 平滑
+            STATE.handPos.y = palmY * 0.8 + STATE.handPos.y * 0.2;
+            updateCursorLight(STATE.handPos.x * 2 - 1, -(STATE.handPos.y * 2 - 1));
+
+            // --- 判定逻辑 (移植自 1215.html) ---
+            
+            // 1. 握拳判定 (计算指尖到掌心的距离)
+            let folded = 0;
+            [8,12,16,20].forEach(i => { 
+                const d = Math.sqrt(Math.pow(landmarks[i].x-landmarks[0].x,2) + Math.pow(landmarks[i].y-landmarks[0].y,2));
+                if(d < 0.25) folded++; // 阈值参考 0.35, 这里稍微严一点
+            });
+            const isFist = folded >= 4;
+
+            // 2. 捏合判定
+            const dPinch = Math.sqrt(Math.pow(landmarks[4].x-landmarks[8].x,2) + Math.pow(landmarks[4].y-landmarks[8].y,2));
+            const isPinch = dPinch < 0.1; // 1215.html 阈值
+            
+            // 3. 张开判定
+            const isOpen = !isFist && !isPinch;
+
+            // --- 状态机切换 ---
+            if (isFist) {
+                // 握拳 -> 树
+                STATE.mode = 'TREE';
+                STATE.rotateVel = 0; // 停止手动旋转
+            } 
+            else if (isPinch && STATE.mode === 'EXPLODE') {
+                // 炸裂下捏合 -> 聚焦
+                STATE.mode = 'FOCUS';
+                // 记录捏合中心点 (归一化到 NDC)
+                const cx = (landmarks[4].x + landmarks[8].x) / 2;
+                const cy = (landmarks[4].y + landmarks[8].y) / 2;
+                STATE.pinchPos.set((1-cx)*2-1, -(cy*2-1));
+            }
+            else if (isOpen) {
+                // 张开
+                if (STATE.mode === 'TREE') {
+                    // 树 -> 炸裂
+                    STATE.mode = 'EXPLODE';
+                    // 重置上一帧位置，防止炸开瞬间乱转
+                    STATE.lastHandPos.x = STATE.handPos.x;
+                } else if (STATE.mode === 'FOCUS' && !isPinch) {
+                    // 松开捏合 -> 回到炸裂
+                    STATE.mode = 'EXPLODE';
+                }
+                
+                // 炸裂状态下的旋转控制 (参考 1215.html 的 Delta 逻辑)
+                if (STATE.mode === 'EXPLODE') {
+                    const deltaX = STATE.handPos.x - STATE.lastHandPos.x;
+                    // 放大系数，手划动一点点，星系转动多一点
+                    STATE.rotateVel += deltaX * 0.2; 
+                }
+            }
+
+            // 更新上一帧位置
+            STATE.lastHandPos.x = STATE.handPos.x;
+            STATE.lastHandPos.y = STATE.handPos.y;
+        }
+
+        // --- 鼠标/触摸输入 (保留作为保底) ---
+        function initInput() {
+            document.addEventListener('mousedown', onPointerDown);
+            document.addEventListener('mousemove', onPointerMove);
+            document.addEventListener('mouseup', onPointerUp);
+            document.addEventListener('touchstart', onPointerDown, {passive: false});
+            document.addEventListener('touchmove', onPointerMove, {passive: false});
+            document.addEventListener('touchend', onPointerUp);
+        }
+
+        let touchStartX = 0;
+        let touchStartTime = 0;
+
+        function onPointerDown(e) {
+            STATE.isDragging = true;
+            if(STATE.inputSource !== 'HAND') STATE.inputSource = 'MOUSE';
+            const x = e.touches ? e.touches[0].clientX : e.clientX;
+            STATE.lastMouseX = x;
+            touchStartX = x;
+            touchStartTime = Date.now();
+        }
+
+        function onPointerMove(e) {
+            const x = e.touches ? e.touches[0].clientX : e.clientX;
+            const y = e.touches ? e.touches[0].clientY : e.clientY;
+            
+            // 如果没检测到手，才用鼠标更新光标
+            if (STATE.inputSource !== 'HAND') {
+                STATE.mousePos.x = (x / window.innerWidth) * 2 - 1;
+                STATE.mousePos.y = -(y / window.innerHeight) * 2 + 1;
+                updateCursorLight(STATE.mousePos.x, STATE.mousePos.y);
+            }
+
+            if (STATE.isDragging && STATE.mode === 'EXPLODE') {
+                e.preventDefault(); 
+                const deltaX = x - STATE.lastMouseX;
+                STATE.rotateVel = deltaX * 0.005; 
+                STATE.lastMouseX = x;
+            }
+        }
+
+        function onPointerUp(e) {
+            STATE.isDragging = false;
+            if(STATE.inputSource === 'HAND') return; // 手势优先
+
+            const x = e.changedTouches ? e.changedTouches[0].clientX : e.clientX;
+            const dist = Math.abs(x - touchStartX);
+            if (dist < 10 && (Date.now() - touchStartTime) < 300) {
+                if (STATE.mode === 'TREE') STATE.mode = 'EXPLODE';
+                else if (STATE.mode === 'EXPLODE') STATE.mode = 'FOCUS';
+                else STATE.mode = 'TREE';
+            }
+        }
+
+        function updateCursorLight(ndcX, ndcY) {
+            const vector = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera);
+            const dir = vector.sub(camera.position).normalize();
+            cursorLight.position.lerp(camera.position.clone().add(dir.multiplyScalar(20)), 0.1);
+            cursorLight.intensity = STATE.mode === 'TREE' ? 10 : 5;
+        }
+
+        // --- 核心动画 ---
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            let targetMix = STATE.mode === 'TREE' ? 0 : 1;
+            STATE.mix += (targetMix - STATE.mix) * 2.0 * delta;
+            
+            // 旋转逻辑
+            if (STATE.mode === 'TREE') {
+                STATE.rotationY += 0.2 * delta;
+                mainGroup.rotation.y = STATE.rotationY;
+                STATE.rotateVel = 0;
+            } else {
+                if (!STATE.isDragging && !STATE.isHandPresent) {
+                    STATE.rotateVel *= 0.95; // 阻尼
+                }
+                // 在手势控制下，阻尼稍微小一点，滑得更顺
+                if (STATE.isHandPresent) STATE.rotateVel *= 0.90;
+
+                STATE.rotationY += STATE.rotateVel;
+                mainGroup.rotation.y = STATE.rotationY;
+            }
+
+            let targetFocus = STATE.mode === 'FOCUS' ? 1 : 0;
+            if(particles) {
+                particleMaterial.uniforms.uTime.value = time;
+                particleMaterial.uniforms.uMix.value = STATE.mix;
+                particleMaterial.uniforms.uFocus.value = THREE.MathUtils.lerp(particleMaterial.uniforms.uFocus.value, targetFocus, 0.1);
+            }
+
+            // 聚焦计算
+            if(STATE.mode === 'FOCUS' && STATE.focusIndex === -1) {
+                let minD = Infinity;
+                photos.forEach((p, i) => {
+                    const worldPos = new THREE.Vector3();
+                    p.obj.getWorldPosition(worldPos);
+                    const ndc = worldPos.clone().project(camera);
+                    const d = ndc.distanceTo(new THREE.Vector3(STATE.pinchPos.x, STATE.pinchPos.y, ndc.z));
+                    if(d < minD && ndc.z < 1) { minD = d; STATE.focusIndex = i; }
+                });
+            }
+            if(STATE.mode !== 'FOCUS') STATE.focusIndex = -1;
+
+            photos.forEach((p, i) => {
+                let targetPos, targetScale = 1;
+                const isSelected = (i === STATE.focusIndex);
+
+                if (STATE.mix > 0.5) { // 炸裂
+                    if (isSelected) {
+                        const invWorldRot = mainGroup.quaternion.clone().invert();
+                        const camFrontLocal = new THREE.Vector3(0, 0, 32).applyQuaternion(invWorldRot);
+                        targetPos = camFrontLocal;
+                        targetScale = 3.5;
+                    } else {
+                        targetPos = p.explodePos.clone();
+                        targetPos.y += Math.sin(time + i) * 0.5; 
+                        targetScale = p.explodeScale;
+                        if (STATE.mode === 'FOCUS') targetScale = 0.0; 
+                    }
+                } else { // 树
+                    targetPos = p.treePos.clone();
+                    targetScale = 1.0;
+                }
+
+                p.obj.position.lerp(targetPos, 0.1);
+                p.obj.scale.setScalar(THREE.MathUtils.lerp(p.obj.scale.x, targetScale, 0.1));
+
+                // Billboard
+                if (STATE.mix > 0.5) {
+                    const parentQ = mainGroup.quaternion.clone();
+                    const cameraQ = camera.quaternion.clone(); 
+                    const targetQ = parentQ.invert().multiply(cameraQ);
+                    if (isSelected) {
+                         const tx = (STATE.inputSource==='HAND'?STATE.pinchPos.y:STATE.mousePos.y)*0.2;
+                         const ty = (STATE.inputSource==='HAND'?STATE.pinchPos.x:STATE.mousePos.x)*0.2;
+                         targetQ.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(tx,ty,0)));
+                    }
+                    p.obj.quaternion.slerp(targetQ, 0.1);
+                } else {
+                    p.obj.quaternion.slerp(new THREE.Quaternion().setFromEuler(p.treeRot), 0.1);
+                }
+            });
+
+            composer.render();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
